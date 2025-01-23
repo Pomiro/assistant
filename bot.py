@@ -42,8 +42,26 @@ def get_google_calendar_service():
 
     return build('calendar', 'v3', credentials=creds)
 
-# LangChain setup
-response_schemas = [
+# LangChain setup for request classification
+request_type_schema = [
+    ResponseSchema(name="type", description="Type of request: 'add_event' or 'show_today'"),
+    ResponseSchema(name="original_text", description="Original text if type is add_event")
+]
+
+request_classifier = StructuredOutputParser.from_response_schemas(request_type_schema)
+
+classifier_prompt = ChatPromptTemplate.from_template("""
+Classify the following request into one of these types:
+1. add_event - when user wants to add an event to calendar
+2. show_today - when user wants to see today's meta-events
+
+Text: {text}
+
+{format_instructions}
+""")
+
+# LangChain setup for event parsing
+event_schemas = [
     ResponseSchema(name="event_type", description="Type of calendar event (meeting, task, etc.)"),
     ResponseSchema(name="title", description="Title or description of the event"),
     ResponseSchema(name="date", description="Date of the event"),
@@ -52,9 +70,9 @@ response_schemas = [
     ResponseSchema(name="event_duration", description="Duration of event", type='float')
 ]
 
-output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+event_parser = StructuredOutputParser.from_response_schemas(event_schemas)
 
-prompt = ChatPromptTemplate.from_template("""
+event_prompt = ChatPromptTemplate.from_template("""
 Extract calendar event information from the following text. If any information is missing, leave it blank.
 
 Text: {text}
@@ -147,10 +165,28 @@ async def create_calendar_event(event_details):
     except Exception as e:
         raise ValueError(f"Failed to create calendar event: {str(e)}")
 
+async def get_today_events(service):
+    """Get today's events from calendar."""
+    tz = timezone(timedelta(hours=5))  # UTC+5 for Yekaterinburg
+    now = datetime.now(tz)
+    
+    today_start = datetime.combine(now.date(), datetime.min.time()).astimezone(tz)
+    today_end = datetime.combine(now.date(), datetime.max.time()).astimezone(tz)
+    
+    events_result = service.events().list(
+        calendarId='primary',
+        timeMin=today_start.isoformat(),
+        timeMax=today_end.isoformat(),
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    
+    return events_result.get('items', [])
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages and create calendar events."""
+    """Handle incoming messages and process requests."""
     try:
-        logging.info(f"Resived a message: {update.message.text}")
+        logging.info(f"Received a message: {update.message.text}")
 
         # OpenAI Client Setup
         client = OpenAI(
@@ -158,17 +194,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_key=os.getenv("OPENROUTER_API_KEY"),
         )
 
-        # Format the prompt
-        _prompt = prompt.format_messages(
+        # First, classify the request
+        _classifier_prompt = classifier_prompt.format_messages(
             text=update.message.text,
-            format_instructions=output_parser.get_format_instructions()
+            format_instructions=request_classifier.get_format_instructions()
         )
-
-        # Convert LangChain prompt to string format
-        prompt_str = _prompt[0].content
-
-        # Send the prompt to OpenAI API
-        completion = client.chat.completions.create(
+        
+        classifier_completion = client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "",
                 "X-Title": "",
@@ -177,20 +209,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[
                 {
                     "role": "user",
-                    "content": prompt_str
+                    "content": _classifier_prompt[0].content
                 }
             ]
         )
-        response_text = completion.choices[0].message.content
-        logging.info(f'LLM response: {response_text}')
-        event_details = output_parser.parse(response_text)
-        logging.info(f'Parser response: {event_details}')
-        # Create calendar event
-        event_link = await create_calendar_event(event_details)
         
-        await update.message.reply_text(
-            f"Event created successfully!\nView it here: {event_link}"
-        )
+        request_type = request_classifier.parse(classifier_completion.choices[0].message.content)
+        logging.info(f'Request type: {request_type}')
+
+        if request_type['type'] == 'show_today':
+            # Handle show today's events request
+            service = get_google_calendar_service()
+            events = await get_today_events(service)
+            
+            if not events:
+                await update.message.reply_text("No events scheduled for today.")
+                return
+                
+            response = "Today's events:\n\n"
+            for event in events:
+                start = event['start'].get('dateTime', event['start'].get('date'))
+                start_time = datetime.fromisoformat(start).astimezone(timezone(timedelta(hours=5)))
+                response += f"• {start_time.strftime('%H:%M')} - {event['summary']}\n"
+            
+            await update.message.reply_text(response)
+            
+        elif request_type['type'] == 'add_event':
+            # Format the event prompt
+            _event_prompt = event_prompt.format_messages(
+                text=request_type['original_text'],
+                format_instructions=event_parser.get_format_instructions()
+            )
+
+            # Get event details
+            event_completion = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "",
+                    "X-Title": "",
+                },
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": _event_prompt[0].content
+                    }
+                ]
+            )
+            
+            event_details = event_parser.parse(event_completion.choices[0].message.content)
+            logging.info(f'Event details: {event_details}')
+            
+            # Create calendar event
+            event_link = await create_calendar_event(event_details)
+            await update.message.reply_text(f"Event created successfully!\nView it here: {event_link}")
+        
+        else:
+            await update.message.reply_text(
+                "I'm not sure what you want to do. You can ask me to:\n"
+                "1. Add an event (e.g., 'Set a meeting tomorrow at 15:00')\n"
+                "2. Show today's events (e.g., 'What's on my schedule today?')"
+            )
         
     except Exception as e:
         await update.message.reply_text(
@@ -200,8 +278,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     await update.message.reply_text(
-        "Hi! I'm your Calendar Bot. You can tell me to create events like:\n"
-        "'Set a meeting with Mikhail today at 17:00'"
+        "Hi! I'm your Calendar Bot. You can:\n"
+        "1. Create events (e.g., 'Set a meeting with Mikhail today at 17:00')\n"
+        "2. View today's events (e.g., 'What's on my schedule today?')"
     )
 
 def main():

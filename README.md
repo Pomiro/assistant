@@ -1,10 +1,11 @@
 # Telegram Bot for Google Calendar Task Management
 
-This is a Telegram bot that helps you manage your Google Calendar events using natural language processing through LangChain and OpenAI.
+This is a Telegram bot that helps you manage your Google Calendar events using natural language processing through LangChain and OpenRouter.
 
 ## Features
 
 - Create calendar events using natural language
+- Show today's events
 - Automatically detects event details (time, date, person, etc.)
 - Integrates with Google Calendar
 - Uses LangChain for command processing
@@ -15,12 +16,10 @@ Send a message to the bot like:
 ```
 Set a meeting with Mikhail today at 17:00
 ```
-
-The bot will:
-1. Parse your message using LangChain and OpenRouter API
-2. Extract relevant event details
-3. Create the event in your Google Calendar
-4. Send you a link to view the event
+or
+```
+What's on my schedule today?
+```
 
 ## Setup Instructions
 
