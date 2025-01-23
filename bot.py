@@ -10,12 +10,17 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import pickle
 from openai import OpenAI
+import logging
+
+# Logging template
+logging.basicConfig(filename="bot.log",encoding="utf-8", level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Load environment variables
 load_dotenv()
 
 # Google Calendar API setup
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+model = 'qwen/qwen-2-7b-instruct:free'
 
 def get_google_calendar_service():
     """Set up and return Google Calendar service."""
@@ -44,6 +49,7 @@ response_schemas = [
     ResponseSchema(name="date", description="Date of the event"),
     ResponseSchema(name="time", description="Time of the event"),
     ResponseSchema(name="person", description="Person involved in the event (if any)"),
+    ResponseSchema(name="event_duration", description="Duration of event", type='float')
 ]
 
 output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
@@ -64,9 +70,9 @@ def normalize_datetime(date_str: str, time_str: str) -> datetime:
     
     # Handle relative dates
     date_lower = date_str.lower()
-    if date_lower == 'today':
+    if date_lower == 'today' or '' or 'сегодня':
         date = now.date()
-    elif date_lower == 'tomorrow':
+    elif date_lower == 'tomorrow' or 'завтра':
         date = (now + timedelta(days=1)).date()
     else:
         try:
@@ -112,15 +118,14 @@ async def create_calendar_event(event_details):
         except ValueError as e:
             raise ValueError(f"Date/time error: {str(e)}")
         
-        # Set event duration based on event type
-        duration = 1  # default 1 hour
-        if event_details.get('event_type'):
-            if event_details['event_type'].lower() in ['meeting', 'appointment']:
+        # Set event duration
+        duration = 1
+        if event_details.get('event_duration'):
+            event_duration = event_details['event_duration']
+            try:
+                duration = float(event_duration)
+            except:
                 duration = 1
-            elif event_details['event_type'].lower() == 'workshop':
-                duration = 2
-            elif event_details['event_type'].lower() == 'conference':
-                duration = 4
         
         event = {
             'summary': event_details['title'],
@@ -136,7 +141,7 @@ async def create_calendar_event(event_details):
         
         if event_details.get('person'):
             event['description'] = f"Meeting with {event_details['person']}"
-        
+        logging.info(f'Final event: {event}')
         event = service.events().insert(calendarId='primary', body=event).execute()
         return event.get('htmlLink')
     except Exception as e:
@@ -145,6 +150,8 @@ async def create_calendar_event(event_details):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages and create calendar events."""
     try:
+        logging.info(f"Resived a message: {update.message.text}")
+
         # OpenAI Client Setup
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -166,7 +173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "HTTP-Referer": "",
                 "X-Title": "",
             },
-            model="google/gemini-flash-1.5",
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -175,8 +182,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
         response_text = completion.choices[0].message.content
+        logging.info(f'LLM response: {response_text}')
         event_details = output_parser.parse(response_text)
-
+        logging.info(f'Parser response: {event_details}')
         # Create calendar event
         event_link = await create_calendar_event(event_details)
         
@@ -197,7 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
-    """Start the bot."""
+    logging.info(f"Start the bot")
     # Create application
     application = Application.builder().token(os.getenv('TELEGRAM_TOKEN')).build()
 
