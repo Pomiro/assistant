@@ -128,8 +128,8 @@ async def create_calendar_event(event_details):
     try:
         service = get_google_calendar_service()
         
-        if not event_details.get('date') or not event_details.get('time'):
-            raise ValueError("Date and time are required")
+        if not event_details.get('time'):
+            raise ValueError("Time are required")
         
         try:
             start_time = normalize_datetime(event_details['date'], event_details['time'])
